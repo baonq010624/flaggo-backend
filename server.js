@@ -5,10 +5,10 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
+import streamifier from "streamifier";
+import { v2 as cloudinary } from "cloudinary";
 
 import User from "./models/User.js";
 import Visit from "./models/Visit.js";
@@ -17,30 +17,56 @@ import FavoriteVote from "./models/FavoriteVote.js";
 
 dotenv.config();
 
+// ============== Cloudinary config ==============
+/**
+ * Dùng 3 biến tách lẻ từ .env (như bạn đã cung cấp).
+ * Nếu muốn gọn có thể dùng CLOUDINARY_URL thay cho block config này.
+ */
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key:    process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Helper: upload buffer -> Cloudinary (stream)
+function uploadBufferToCloudinary(buffer, folder = "flaggo/avatars") {
+    return new Promise((resolve, reject) => {
+        const cldStream = cloudinary.uploader.upload_stream(
+            {
+                folder,
+                resource_type: "image",
+                transformation: [{ width: 512, height: 512, crop: "limit", quality: "auto" }],
+            },
+            (err, result) => {
+                if (err) return reject(err);
+                resolve(result); // result.secure_url là URL CDN
+            }
+        );
+        streamifier.createReadStream(buffer).pipe(cldStream);
+    });
+}
+
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
 // ================= CORS (Cách 2: nhiều origin) =================
 // Ưu tiên ALLOWED_ORIGINS (chuỗi, cách nhau dấu phẩy), fallback sang CLIENT_URL hoặc localhost.
-const allowedOrigins = (process.env.ALLOWED_ORIGINS ||
+const allowedOrigins = (
+    process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
-    "http://localhost:3000")
+    "http://localhost:3000"
+)
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
-// Có thể log để kiểm tra khi khởi động
 console.log("[CORS] allowedOrigins:", allowedOrigins);
 
 const corsOptionsDelegate = function (origin, callback) {
-    // Cho phép các request "non-browser" hoặc SSR không có Origin header
-    if (!origin) {
-        return callback(null, true);
-    }
-    if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-    }
+    // Cho phép các request không có Origin (Postman, SSR…)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
 };
 
@@ -51,10 +77,7 @@ app.use(
     })
 );
 
-// uploads directory
-const UPLOAD_DIR = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use("/uploads", express.static(UPLOAD_DIR));
+// (Không dùng disk để lưu ảnh nữa, nên không cần static /uploads)
 
 // ================= DB =================
 mongoose
@@ -94,18 +117,9 @@ function requireAuth(req, res, next) {
 }
 
 // ================= multer (upload) =================
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, UPLOAD_DIR);
-    },
-    filename: function (req, file, cb) {
-        const safeName = file.originalname.replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "");
-        const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${safeName}`;
-        cb(null, unique);
-    },
-});
+// Dùng memoryStorage để stream thẳng lên Cloudinary
 const upload = multer({
-    storage,
+    storage: multer.memoryStorage(),
     limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
     fileFilter: (req, file, cb) => {
         if (!file.mimetype.startsWith("image/")) return cb(new Error("Only images allowed"));
@@ -193,7 +207,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Refresh token (cookie or body)
+// Refresh token (cookie hoặc body)
 app.post("/api/auth/refresh", async (req, res) => {
     try {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
@@ -285,7 +299,7 @@ app.get("/api/me", requireAuth, async (req, res) => {
             phone: user.phone,
             createdAt: user.createdAt,
             role: user.role || "user",
-            avatar: user.avatar ? `/uploads/${user.avatar}` : "",
+            avatar: user.avatar || "", // giữ nguyên URL (Cloudinary)
         });
     } catch (err) {
         console.error("Error fetching user:", err);
@@ -293,29 +307,27 @@ app.get("/api/me", requireAuth, async (req, res) => {
     }
 });
 
-// Upload avatar (require auth before saving)
+// Upload avatar -> Cloudinary (không dùng disk)
 app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, res) => {
     try {
-        if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+        if (!req.file || !req.file.buffer) {
+            return res.status(400).json({ message: "No file uploaded" });
+        }
 
         const user = await User.findById(req.user.sub);
-        if (!user) {
-            try { if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
-            return res.status(404).json({ message: "User not found" });
-        }
+        if (!user) return res.status(404).json({ message: "User not found" });
 
-        if (user.avatar) {
-            const oldPath = path.join(UPLOAD_DIR, path.basename(user.avatar));
-            try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch (e) { console.warn("Failed to remove old avatar", e); }
-        }
+        // (Tuỳ chọn) Nếu muốn xoá ảnh cũ trên Cloudinary, hãy lưu public_id để destroy trước khi ghi mới.
 
-        user.avatar = req.file.filename;
+        const result = await uploadBufferToCloudinary(req.file.buffer, "flaggo/avatars");
+        const secureUrl = result.secure_url;
+
+        user.avatar = secureUrl; // lưu URL CDN
         await user.save();
 
-        res.json({ message: "Avatar updated", avatar: `/uploads/${req.file.filename}` });
+        res.json({ message: "Avatar updated", avatar: secureUrl });
     } catch (err) {
         console.error("Avatar upload error:", err);
-        if (req.file && req.file.path) { try { if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {} }
         res.status(500).json({ message: "Failed to update avatar" });
     }
 });
@@ -449,7 +461,6 @@ app.get("/api/track/favorite/state", async (req, res) => {
  * NEW: Toggle favorite
  * POST /api/track/favorite/toggle
  * body: { heritageId, name, clientId, vote } — vote: true (thích), false (bỏ thích)
- * đảm bảo count không âm; đếm theo phiếu client
  */
 app.post("/api/track/favorite/toggle", async (req, res) => {
     try {
@@ -504,7 +515,7 @@ app.post("/api/track/favorite/toggle", async (req, res) => {
 });
 
 /**
- * ADMIN: Top favorites (không đổi)
+ * ADMIN: Top favorites
  * GET /api/admin/favorites?limit=20
  */
 app.get("/api/admin/favorites", requireAuth, async (req, res) => {
