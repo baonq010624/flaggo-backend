@@ -18,10 +18,6 @@ import FavoriteVote from "./models/FavoriteVote.js";
 dotenv.config();
 
 // ============== Cloudinary config ==============
-/**
- * Dùng 3 biến tách lẻ từ .env (như bạn đã cung cấp).
- * Nếu muốn gọn có thể dùng CLOUDINARY_URL thay cho block config này.
- */
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key:    process.env.CLOUDINARY_API_KEY,
@@ -50,8 +46,12 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// ================= CORS (Cách 2: nhiều origin) =================
-// Ưu tiên ALLOWED_ORIGINS (chuỗi, cách nhau dấu phẩy), fallback sang CLIENT_URL hoặc localhost.
+// Nếu deploy sau reverse proxy (Heroku, Render, Vercel Edge...), nên bật:
+if (process.env.NODE_ENV === "production") {
+    app.set("trust proxy", 1);
+}
+
+// ================= CORS =================
 const allowedOrigins = (
     process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
@@ -64,20 +64,12 @@ const allowedOrigins = (
 console.log("[CORS] allowedOrigins:", allowedOrigins);
 
 const corsOptionsDelegate = function (origin, callback) {
-    // Cho phép các request không có Origin (Postman, SSR…)
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // Cho phép Postman/SSR
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
 };
 
-app.use(
-    cors({
-        origin: corsOptionsDelegate,
-        credentials: true,
-    })
-);
-
-// (Không dùng disk để lưu ảnh nữa, nên không cần static /uploads)
+app.use(cors({ origin: corsOptionsDelegate, credentials: true }));
 
 // ================= DB =================
 mongoose
@@ -90,9 +82,11 @@ mongoose
 
 // ================= JWT helpers =================
 function generateAccessToken(user) {
-    return jwt.sign({ sub: user._id, email: user.email }, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: "15m",
-    });
+    return jwt.sign(
+        { sub: user._id, email: user.email },
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: "15m" }
+    );
 }
 
 function generateRefreshToken(user) {
@@ -100,6 +94,20 @@ function generateRefreshToken(user) {
         expiresIn: "7d",
     });
 }
+
+// Cookie helpers (đồng bộ mọi nơi)
+const cookieOpts = () => ({
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "none",
+    maxAge: 7 * 24 * 3600 * 1000,
+    path: "/",
+});
+const clearCookieOpts = () => ({
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "none",
+});
 
 // ================= middleware =================
 function requireAuth(req, res, next) {
@@ -117,7 +125,6 @@ function requireAuth(req, res, next) {
 }
 
 // ================= multer (upload) =================
-// Dùng memoryStorage để stream thẳng lên Cloudinary
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
@@ -151,13 +158,7 @@ app.post("/api/auth/register", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", refreshToken, cookieOpts());
 
         return res.status(201).json({
             accessToken,
@@ -189,13 +190,7 @@ app.post("/api/auth/login", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", refreshToken, cookieOpts());
 
         res.json({
             accessToken,
@@ -207,7 +202,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Refresh token (cookie hoặc body)
+// Refresh token (ưu tiên lấy từ cookie)
 app.post("/api/auth/refresh", async (req, res) => {
     try {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
@@ -237,13 +232,7 @@ app.post("/api/auth/refresh", async (req, res) => {
 
         const accessToken = generateAccessToken(user);
 
-        res.cookie("refreshToken", newRefresh, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", newRefresh, cookieOpts());
 
         res.json({
             accessToken,
@@ -261,11 +250,7 @@ app.post("/api/auth/logout", async (req, res) => {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
         if (token) {
             const payload = (() => {
-                try {
-                    return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
-                } catch {
-                    return null;
-                }
+                try { return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET); } catch { return null; }
             })();
             if (payload) {
                 const user = await User.findById(payload.sub);
@@ -276,7 +261,7 @@ app.post("/api/auth/logout", async (req, res) => {
             }
         }
 
-        res.clearCookie("refreshToken", { path: "/" });
+        res.clearCookie("refreshToken", clearCookieOpts());
         res.json({ message: "Logged out" });
     } catch (err) {
         console.error("Logout error:", err);
@@ -285,8 +270,6 @@ app.post("/api/auth/logout", async (req, res) => {
 });
 
 // ================= USER routes =================
-
-// Get profile
 app.get("/api/me", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("-passwordHash -refreshTokens");
@@ -299,7 +282,7 @@ app.get("/api/me", requireAuth, async (req, res) => {
             phone: user.phone,
             createdAt: user.createdAt,
             role: user.role || "user",
-            avatar: user.avatar || "", // giữ nguyên URL (Cloudinary)
+            avatar: user.avatar || "",
         });
     } catch (err) {
         console.error("Error fetching user:", err);
@@ -307,7 +290,7 @@ app.get("/api/me", requireAuth, async (req, res) => {
     }
 });
 
-// Upload avatar -> Cloudinary (không dùng disk)
+// Upload avatar -> Cloudinary
 app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, res) => {
     try {
         if (!req.file || !req.file.buffer) {
@@ -317,12 +300,10 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
         const user = await User.findById(req.user.sub);
         if (!user) return res.status(404).json({ message: "User not found" });
 
-        // (Tuỳ chọn) Nếu muốn xoá ảnh cũ trên Cloudinary, hãy lưu public_id để destroy trước khi ghi mới.
-
         const result = await uploadBufferToCloudinary(req.file.buffer, "flaggo/avatars");
         const secureUrl = result.secure_url;
 
-        user.avatar = secureUrl; // lưu URL CDN
+        user.avatar = secureUrl;
         await user.save();
 
         res.json({ message: "Avatar updated", avatar: secureUrl });
@@ -336,8 +317,6 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
 function startOfDayUTC(date = new Date()) {
     return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
-
-// ghi nhận lượt truy cập
 app.post("/api/track/visit", async (req, res) => {
     try {
         const today = startOfDayUTC(new Date());
@@ -416,8 +395,6 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
 });
 
 // ================= FAVORITES =================
-
-// (giữ endpoint cũ cho tương thích; vẫn chỉ tăng)
 app.post("/api/track/favorite", async (req, res) => {
     try {
         const { heritageId, name } = req.body || {};
@@ -439,10 +416,7 @@ app.post("/api/track/favorite", async (req, res) => {
     }
 });
 
-/**
- * NEW: Kiểm tra trạng thái vote của 1 client với 1 heritage
- * GET /api/track/favorite/state?heritageId=...&clientId=...
- */
+// NEW: Kiểm tra vote state
 app.get("/api/track/favorite/state", async (req, res) => {
     try {
         const heritageId = String(req.query.heritageId || "").trim();
@@ -457,11 +431,7 @@ app.get("/api/track/favorite/state", async (req, res) => {
     }
 });
 
-/**
- * NEW: Toggle favorite
- * POST /api/track/favorite/toggle
- * body: { heritageId, name, clientId, vote } — vote: true (thích), false (bỏ thích)
- */
+// NEW: Toggle favorite
 app.post("/api/track/favorite/toggle", async (req, res) => {
     try {
         const { heritageId, name, clientId, vote } = req.body || {};
@@ -472,10 +442,8 @@ app.post("/api/track/favorite/toggle", async (req, res) => {
 
         if (!id || !nm || !cid) return res.status(400).json({ ok: false, message: "Missing params" });
 
-        // Tìm phiếu cũ
         const existing = await FavoriteVote.findOne({ heritageId: id, clientId: cid });
 
-        // Đảm bảo doc Favorite tồn tại
         const favDoc = await Favorite.findOneAndUpdate(
             { heritageId: id },
             { $setOnInsert: { heritageId: id, name: nm } },
@@ -484,18 +452,15 @@ app.post("/api/track/favorite/toggle", async (req, res) => {
 
         let delta = 0;
         if (!existing) {
-            // chưa có phiếu → tạo mới theo want
-            if (want) delta = 1; // bật thích
+            if (want) delta = 1;
             await FavoriteVote.create({ heritageId: id, clientId: cid, voted: want, name: nm });
         } else {
-            // có phiếu → nếu trạng thái khác, cập nhật và tính delta
             if (existing.voted !== want) {
                 delta = want ? 1 : -1;
                 existing.voted = want;
                 existing.name = nm || existing.name;
                 await existing.save();
             } else {
-                // không đổi
                 delta = 0;
             }
         }
@@ -511,27 +476,6 @@ app.post("/api/track/favorite/toggle", async (req, res) => {
     } catch (err) {
         console.error("favorite toggle error:", err);
         res.status(500).json({ ok: false });
-    }
-});
-
-/**
- * ADMIN: Top favorites
- * GET /api/admin/favorites?limit=20
- */
-app.get("/api/admin/favorites", requireAuth, async (req, res) => {
-    try {
-        const me = await User.findById(req.user.sub).select("role");
-        if (!me) return res.status(404).json({ message: "User not found" });
-        if (me.role !== "admin") return res.status(403).json({ message: "Access denied" });
-
-        const limit = Math.max(1, Math.min(parseInt(req.query.limit || "20", 10), 100));
-        const docs = await Favorite.find({}).sort({ count: -1, updatedAt: -1 }).limit(limit).lean();
-
-        const rows = docs.map((d) => ({ label: d.name, value: d.count }));
-        res.json({ rows });
-    } catch (err) {
-        console.error("admin favorites error:", err);
-        res.status(500).json({ message: "Failed to fetch favorites" });
     }
 });
 
