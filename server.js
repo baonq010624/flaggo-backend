@@ -33,10 +33,7 @@ function uploadBufferToCloudinary(buffer, folder = "flaggo/avatars") {
                 resource_type: "image",
                 transformation: [{ width: 512, height: 512, crop: "limit", quality: "auto" }],
             },
-            (err, result) => {
-                if (err) return reject(err);
-                resolve(result); // result.secure_url là URL CDN
-            }
+            (err, result) => (err ? reject(err) : resolve(result))
         );
         streamifier.createReadStream(buffer).pipe(cldStream);
     });
@@ -46,7 +43,7 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// Nếu deploy sau reverse proxy (Heroku, Render, Vercel Edge...), nên bật:
+// Tin cậy proxy khi deploy (giúp set cookie Secure chuẩn)
 if (process.env.NODE_ENV === "production") {
     app.set("trust proxy", 1);
 }
@@ -88,25 +85,25 @@ function generateAccessToken(user) {
         { expiresIn: "15m" }
     );
 }
-
 function generateRefreshToken(user) {
     return jwt.sign({ sub: user._id }, process.env.REFRESH_TOKEN_SECRET, {
         expiresIn: "7d",
     });
 }
 
-// Cookie helpers (đồng bộ mọi nơi)
+// Cookie options theo môi trường
+const isProd = process.env.NODE_ENV === "production";
 const cookieOpts = () => ({
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
+    secure: isProd,                 // prod: true, dev: false
+    sameSite: isProd ? "none" : "lax", // prod: none, dev: lax
     maxAge: 7 * 24 * 3600 * 1000,
     path: "/",
 });
 const clearCookieOpts = () => ({
     path: "/",
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
+    secure: isProd,
+    sameSite: isProd ? "none" : "lax",
 });
 
 // ================= middleware =================
@@ -119,7 +116,7 @@ function requireAuth(req, res, next) {
         const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
         req.user = decoded;
         next();
-    } catch (err) {
+    } catch {
         return res.status(403).json({ message: "Invalid token" });
     }
 }
@@ -127,7 +124,7 @@ function requireAuth(req, res, next) {
 // ================= multer (upload) =================
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+    limits: { fileSize: 2 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         if (!file.mimetype.startsWith("image/")) return cb(new Error("Only images allowed"));
         cb(null, true);
@@ -202,7 +199,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Refresh token (ưu tiên lấy từ cookie)
+// Refresh (ưu tiên cookie)
 app.post("/api/auth/refresh", async (req, res) => {
     try {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
@@ -211,7 +208,7 @@ app.post("/api/auth/refresh", async (req, res) => {
         let payload;
         try {
             payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
-        } catch (e) {
+        } catch {
             return res.status(401).json({ message: "Invalid refresh token" });
         }
 
@@ -224,7 +221,7 @@ app.post("/api/auth/refresh", async (req, res) => {
             return res.status(401).json({ message: "Refresh token not recognized" });
         }
 
-        // rotate refresh tokens
+        // rotate
         user.refreshTokens = user.refreshTokens.filter((t) => t !== token);
         const newRefresh = generateRefreshToken(user);
         user.refreshTokens.push(newRefresh);
@@ -260,7 +257,6 @@ app.post("/api/auth/logout", async (req, res) => {
                 }
             }
         }
-
         res.clearCookie("refreshToken", clearCookieOpts());
         res.json({ message: "Logged out" });
     } catch (err) {
@@ -296,7 +292,6 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
         if (!req.file || !req.file.buffer) {
             return res.status(400).json({ message: "No file uploaded" });
         }
-
         const user = await User.findById(req.user.sub);
         if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -332,7 +327,7 @@ app.post("/api/track/visit", async (req, res) => {
     }
 });
 
-// ================= ADMIN: basic stats =================
+// ================= ADMIN =================
 app.get("/api/admin/stats", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("role");
@@ -347,7 +342,6 @@ app.get("/api/admin/stats", requireAuth, async (req, res) => {
     }
 });
 
-// ================= ADMIN: visits chart =================
 app.get("/api/admin/visits", requireAuth, async (req, res) => {
     try {
         const me = await User.findById(req.user.sub).select("role");
@@ -394,88 +388,21 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
     }
 });
 
-// ================= FAVORITES =================
-app.post("/api/track/favorite", async (req, res) => {
+// TOP favorites (giữ nguyên)
+app.get("/api/admin/favorites", requireAuth, async (req, res) => {
     try {
-        const { heritageId, name } = req.body || {};
-        const id = String(heritageId || "").trim();
-        const nm = String(name || "").trim();
+        const me = await User.findById(req.user.sub).select("role");
+        if (!me) return res.status(404).json({ message: "User not found" });
+        if (me.role !== "admin") return res.status(403).json({ message: "Access denied" });
 
-        if (!id || !nm) return res.status(400).json({ ok: false, message: "Missing heritageId or name" });
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit || "20", 10), 100));
+        const docs = await Favorite.find({}).sort({ count: -1, updatedAt: -1 }).limit(limit).lean();
 
-        await Favorite.updateOne(
-            { heritageId: id },
-            { $setOnInsert: { heritageId: id }, $set: { name: nm }, $inc: { count: 1 } },
-            { upsert: true }
-        );
-
-        res.json({ ok: true });
+        const rows = docs.map((d) => ({ label: d.name, value: d.count }));
+        res.json({ rows });
     } catch (err) {
-        console.error("track favorite error:", err);
-        res.status(500).json({ ok: false });
-    }
-});
-
-// NEW: Kiểm tra vote state
-app.get("/api/track/favorite/state", async (req, res) => {
-    try {
-        const heritageId = String(req.query.heritageId || "").trim();
-        const clientId = String(req.query.clientId || "").trim();
-        if (!heritageId || !clientId) return res.status(400).json({ voted: false });
-
-        const vote = await FavoriteVote.findOne({ heritageId, clientId }).lean();
-        res.json({ voted: !!(vote && vote.voted) });
-    } catch (err) {
-        console.error("favorite state error:", err);
-        res.status(200).json({ voted: false });
-    }
-});
-
-// NEW: Toggle favorite
-app.post("/api/track/favorite/toggle", async (req, res) => {
-    try {
-        const { heritageId, name, clientId, vote } = req.body || {};
-        const id = String(heritageId || "").trim();
-        const nm = String(name || "").trim();
-        const cid = String(clientId || "").trim();
-        const want = !!vote;
-
-        if (!id || !nm || !cid) return res.status(400).json({ ok: false, message: "Missing params" });
-
-        const existing = await FavoriteVote.findOne({ heritageId: id, clientId: cid });
-
-        const favDoc = await Favorite.findOneAndUpdate(
-            { heritageId: id },
-            { $setOnInsert: { heritageId: id, name: nm } },
-            { new: true, upsert: true }
-        );
-
-        let delta = 0;
-        if (!existing) {
-            if (want) delta = 1;
-            await FavoriteVote.create({ heritageId: id, clientId: cid, voted: want, name: nm });
-        } else {
-            if (existing.voted !== want) {
-                delta = want ? 1 : -1;
-                existing.voted = want;
-                existing.name = nm || existing.name;
-                await existing.save();
-            } else {
-                delta = 0;
-            }
-        }
-
-        if (delta !== 0) {
-            const newCount = Math.max(0, (favDoc.count || 0) + delta);
-            favDoc.count = newCount;
-            favDoc.name = nm || favDoc.name;
-            await favDoc.save();
-        }
-
-        return res.json({ ok: true, voted: want });
-    } catch (err) {
-        console.error("favorite toggle error:", err);
-        res.status(500).json({ ok: false });
+        console.error("admin favorites error:", err);
+        res.status(500).json({ message: "Failed to fetch favorites" });
     }
 });
 
