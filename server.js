@@ -33,7 +33,10 @@ function uploadBufferToCloudinary(buffer, folder = "flaggo/avatars") {
                 resource_type: "image",
                 transformation: [{ width: 512, height: 512, crop: "limit", quality: "auto" }],
             },
-            (err, result) => (err ? reject(err) : resolve(result))
+            (err, result) => {
+                if (err) return reject(err);
+                resolve(result);
+            }
         );
         streamifier.createReadStream(buffer).pipe(cldStream);
     });
@@ -43,12 +46,7 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// Tin cậy proxy khi deploy (giúp set cookie Secure chuẩn)
-if (process.env.NODE_ENV === "production") {
-    app.set("trust proxy", 1);
-}
-
-// ================= CORS =================
+// ================= CORS (multi-origin) =================
 const allowedOrigins = (
     process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
@@ -61,12 +59,18 @@ const allowedOrigins = (
 console.log("[CORS] allowedOrigins:", allowedOrigins);
 
 const corsOptionsDelegate = function (origin, callback) {
-    if (!origin) return callback(null, true); // Cho phép Postman/SSR
+    if (!origin) return callback(null, true); // Postman/SSR
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
 };
 
-app.use(cors({ origin: corsOptionsDelegate, credentials: true }));
+app.use(
+    cors({
+        origin: corsOptionsDelegate,
+        credentials: true,
+    })
+);
+
 
 // ================= DB =================
 mongoose
@@ -79,32 +83,16 @@ mongoose
 
 // ================= JWT helpers =================
 function generateAccessToken(user) {
-    return jwt.sign(
-        { sub: user._id, email: user.email },
-        process.env.ACCESS_TOKEN_SECRET,
-        { expiresIn: "15m" }
-    );
+    return jwt.sign({ sub: user._id, email: user.email }, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "15m",
+    });
 }
+
 function generateRefreshToken(user) {
     return jwt.sign({ sub: user._id }, process.env.REFRESH_TOKEN_SECRET, {
         expiresIn: "7d",
     });
 }
-
-// Cookie options theo môi trường
-const isProd = process.env.NODE_ENV === "production";
-const cookieOpts = () => ({
-    httpOnly: true,
-    secure: isProd,                 // prod: true, dev: false
-    sameSite: isProd ? "none" : "lax", // prod: none, dev: lax
-    maxAge: 7 * 24 * 3600 * 1000,
-    path: "/",
-});
-const clearCookieOpts = () => ({
-    path: "/",
-    secure: isProd,
-    sameSite: isProd ? "none" : "lax",
-});
 
 // ================= middleware =================
 function requireAuth(req, res, next) {
@@ -116,7 +104,7 @@ function requireAuth(req, res, next) {
         const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
         req.user = decoded;
         next();
-    } catch {
+    } catch (err) {
         return res.status(403).json({ message: "Invalid token" });
     }
 }
@@ -124,7 +112,7 @@ function requireAuth(req, res, next) {
 // ================= multer (upload) =================
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 2 * 1024 * 1024 },
+    limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
     fileFilter: (req, file, cb) => {
         if (!file.mimetype.startsWith("image/")) return cb(new Error("Only images allowed"));
         cb(null, true);
@@ -155,11 +143,17 @@ app.post("/api/auth/register", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, cookieOpts());
+        res.cookie("refreshToken", refreshToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 7 * 24 * 3600 * 1000,
+            path: "/",
+        });
 
         return res.status(201).json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user" },
+            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
             message: "Đăng ký thành công",
         });
     } catch (err) {
@@ -187,11 +181,17 @@ app.post("/api/auth/login", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, cookieOpts());
+        res.cookie("refreshToken", refreshToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 7 * 24 * 3600 * 1000,
+            path: "/",
+        });
 
         res.json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user" },
+            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
         });
     } catch (err) {
         console.error("Login error:", err);
@@ -199,7 +199,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Refresh (ưu tiên cookie)
+// Refresh token (cookie hoặc body)
 app.post("/api/auth/refresh", async (req, res) => {
     try {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
@@ -208,7 +208,7 @@ app.post("/api/auth/refresh", async (req, res) => {
         let payload;
         try {
             payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
-        } catch {
+        } catch (e) {
             return res.status(401).json({ message: "Invalid refresh token" });
         }
 
@@ -221,7 +221,7 @@ app.post("/api/auth/refresh", async (req, res) => {
             return res.status(401).json({ message: "Refresh token not recognized" });
         }
 
-        // rotate
+        // rotate refresh tokens
         user.refreshTokens = user.refreshTokens.filter((t) => t !== token);
         const newRefresh = generateRefreshToken(user);
         user.refreshTokens.push(newRefresh);
@@ -229,11 +229,17 @@ app.post("/api/auth/refresh", async (req, res) => {
 
         const accessToken = generateAccessToken(user);
 
-        res.cookie("refreshToken", newRefresh, cookieOpts());
+        res.cookie("refreshToken", newRefresh, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 7 * 24 * 3600 * 1000,
+            path: "/",
+        });
 
         res.json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user" },
+            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
         });
     } catch (err) {
         console.error("Refresh error:", err);
@@ -257,7 +263,8 @@ app.post("/api/auth/logout", async (req, res) => {
                 }
             }
         }
-        res.clearCookie("refreshToken", clearCookieOpts());
+
+        res.clearCookie("refreshToken", { path: "/" });
         res.json({ message: "Logged out" });
     } catch (err) {
         console.error("Logout error:", err);
@@ -266,6 +273,8 @@ app.post("/api/auth/logout", async (req, res) => {
 });
 
 // ================= USER routes =================
+
+// Get profile
 app.get("/api/me", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("-passwordHash -refreshTokens");
@@ -292,6 +301,7 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
         if (!req.file || !req.file.buffer) {
             return res.status(400).json({ message: "No file uploaded" });
         }
+
         const user = await User.findById(req.user.sub);
         if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -312,6 +322,7 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
 function startOfDayUTC(date = new Date()) {
     return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
+
 app.post("/api/track/visit", async (req, res) => {
     try {
         const today = startOfDayUTC(new Date());
@@ -327,7 +338,7 @@ app.post("/api/track/visit", async (req, res) => {
     }
 });
 
-// ================= ADMIN =================
+// ================= ADMIN: basic stats =================
 app.get("/api/admin/stats", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("role");
@@ -342,6 +353,7 @@ app.get("/api/admin/stats", requireAuth, async (req, res) => {
     }
 });
 
+// ================= ADMIN: visits chart =================
 app.get("/api/admin/visits", requireAuth, async (req, res) => {
     try {
         const me = await User.findById(req.user.sub).select("role");
@@ -388,7 +400,128 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
     }
 });
 
-// TOP favorites (giữ nguyên)
+// ================= FAVORITES =================
+// Log helper
+function logFav(msg, extra = {}) {
+    try {
+        console.log(`[FAV] ${msg}`, extra);
+    } catch {}
+}
+
+// Preflight for the two favorite endpoints (+ alias)
+app.options("/api/track/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
+app.options("/api/track/favorite/toggle", cors({ origin: corsOptionsDelegate, credentials: true }));
+app.options("/api/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
+app.options("/api/favorite/toggle", cors({ origin: corsOptionsDelegate, credentials: true }));
+
+// (legacy still available: /api/track/favorite — tăng đếm đơn thuần)
+app.post("/api/track/favorite", async (req, res) => {
+    try {
+        const { heritageId, name } = req.body || {};
+        const id = String(heritageId || "").trim();
+        const nm = String(name || "").trim();
+        if (!id || !nm) return res.status(400).json({ ok: false, message: "Missing heritageId or name" });
+
+        await Favorite.updateOne(
+            { heritageId: id },
+            { $setOnInsert: { heritageId: id }, $set: { name: nm }, $inc: { count: 1 } },
+            { upsert: true }
+        );
+
+        res.json({ ok: true });
+    } catch (err) {
+        console.error("track favorite error:", err);
+        res.status(500).json({ ok: false });
+    }
+});
+
+/**
+ * NEW: Kiểm tra trạng thái vote của 1 client với 1 heritage
+ * GET  /api/track/favorite/state?heritageId=...&clientId=...
+ * ALIAS: /api/favorite/state
+ */
+async function handleFavoriteState(req, res) {
+    try {
+        const heritageId = String(req.query.heritageId || "").trim();
+        const clientId = String(req.query.clientId || "").trim();
+        if (!heritageId || !clientId) {
+            logFav("state missing params", { heritageId, clientId });
+            return res.status(400).json({ voted: false });
+        }
+        const vote = await FavoriteVote.findOne({ heritageId, clientId }).lean();
+        logFav("state ok", { heritageId, clientId, voted: !!(vote && vote.voted) });
+        res.json({ voted: !!(vote && vote.voted) });
+    } catch (err) {
+        console.error("favorite state error:", err);
+        res.status(200).json({ voted: false });
+    }
+}
+app.get("/api/track/favorite/state", handleFavoriteState);
+app.get("/api/favorite/state", handleFavoriteState); // alias
+
+/**
+ * NEW: Toggle favorite
+ * POST /api/track/favorite/toggle
+ * ALIAS: /api/favorite/toggle
+ * body: { heritageId, name, clientId, vote }
+ */
+async function handleFavoriteToggle(req, res) {
+    try {
+        const { heritageId, name, clientId, vote } = req.body || {};
+        const id = String(heritageId || "").trim();
+        const nm = String(name || "").trim();
+        const cid = String(clientId || "").trim();
+        const want = !!vote;
+
+        if (!id || !nm || !cid) {
+            logFav("toggle missing params", { id, nm, cid });
+            return res.status(400).json({ ok: false, message: "Missing params" });
+        }
+
+        const existing = await FavoriteVote.findOne({ heritageId: id, clientId: cid });
+
+        const favDoc = await Favorite.findOneAndUpdate(
+            { heritageId: id },
+            { $setOnInsert: { heritageId: id, name: nm } },
+            { new: true, upsert: true }
+        );
+
+        let delta = 0;
+        if (!existing) {
+            if (want) delta = 1;
+            await FavoriteVote.create({ heritageId: id, clientId: cid, voted: want, name: nm });
+        } else {
+            if (existing.voted !== want) {
+                delta = want ? 1 : -1;
+                existing.voted = want;
+                existing.name = nm || existing.name;
+                await existing.save();
+            } else {
+                delta = 0;
+            }
+        }
+
+        if (delta !== 0) {
+            const newCount = Math.max(0, (favDoc.count || 0) + delta);
+            favDoc.count = newCount;
+            favDoc.name = nm || favDoc.name;
+            await favDoc.save();
+        }
+
+        logFav("toggle ok", { id, cid, want, delta });
+        return res.json({ ok: true, voted: want });
+    } catch (err) {
+        console.error("favorite toggle error:", err);
+        res.status(500).json({ ok: false });
+    }
+}
+app.post("/api/track/favorite/toggle", handleFavoriteToggle);
+app.post("/api/favorite/toggle", handleFavoriteToggle); // alias
+
+/**
+ * ADMIN: Top favorites
+ * GET /api/admin/favorites?limit=20
+ */
 app.get("/api/admin/favorites", requireAuth, async (req, res) => {
     try {
         const me = await User.findById(req.user.sub).select("role");
