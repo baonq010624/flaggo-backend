@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import streamifier from "streamifier";
 import { v2 as cloudinary } from "cloudinary";
+import UserFavorite from "./models/UserFavorite.js";
 
 import User from "./models/User.js";
 import Visit from "./models/Visit.js";
@@ -538,6 +539,57 @@ app.get("/api/admin/favorites", requireAuth, async (req, res) => {
         res.status(500).json({ message: "Failed to fetch favorites" });
     }
 });
+
+// ================= USER PERSONAL FAVORITES (per-user) =================
+// GET /api/user/favorites  -> trả danh sách heritage user đã lưu
+app.get("/api/user/favorites", requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.sub;
+        const rows = await UserFavorite
+            .find({ userId })
+            .sort({ createdAt: -1 })
+            .lean();
+
+        res.json({
+            items: rows.map(r => ({
+                heritageId: r.heritageId,
+                name: r.name || "",
+                createdAt: r.createdAt,
+            })),
+        });
+    } catch (err) {
+        console.error("get /api/user/favorites error:", err);
+        res.status(500).json({ message: "Failed to fetch favorites" });
+    }
+});
+
+// POST /api/user/favorites/toggle { heritageId, name, vote: true|false }
+// - vote=true => lưu / upsert
+// - vote=false => xóa
+app.post("/api/user/favorites/toggle", requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.sub;
+        const { heritageId, name, vote } = req.body || {};
+        const id = String(heritageId || "").trim();
+        if (!id) return res.status(400).json({ ok: false, message: "Missing heritageId" });
+
+        if (vote) {
+            await UserFavorite.updateOne(
+                { userId, heritageId: id },
+                { $set: { name: String(name || "") } },
+                { upsert: true }
+            );
+            return res.json({ ok: true, saved: true });
+        } else {
+            await UserFavorite.deleteOne({ userId, heritageId: id });
+            return res.json({ ok: true, saved: false });
+        }
+    } catch (err) {
+        console.error("post /api/user/favorites/toggle error:", err);
+        res.status(500).json({ ok: false, message: "Failed to toggle favorite" });
+    }
+});
+
 
 // ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
