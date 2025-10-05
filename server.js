@@ -51,7 +51,8 @@ app.use(cookieParser());
 const allowedOrigins = (
     process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
-    "http://localhost:3000"
+    // mặc định đa môi trường (prod + preview + local)
+    "https://flaggo.online, https://flaggoweb.netlify.app, http://localhost:3000"
 )
     .split(",")
     .map((s) => s.trim())
@@ -65,13 +66,13 @@ const corsOptionsDelegate = function (origin, callback) {
     return callback(new Error("Not allowed by CORS"));
 };
 
+// cors toàn cục (bao gồm preflight)
 app.use(
     cors({
         origin: corsOptionsDelegate,
         credentials: true,
     })
 );
-
 
 // ================= DB =================
 mongoose
@@ -120,6 +121,21 @@ const upload = multer({
     },
 });
 
+// ================= cookie opts (prod vs dev) =================
+const isProd = process.env.NODE_ENV === "production";
+const cookieOpts = {
+    httpOnly: true,
+    secure: isProd,                 // prod: true (HTTPS), dev: false
+    sameSite: isProd ? "none" : "lax", // prod cross-site cần None; dev để Lax
+    maxAge: 7 * 24 * 3600 * 1000,
+    path: "/",
+};
+const clearCookieOpts = {
+    path: "/",
+    secure: isProd,
+    sameSite: isProd ? "none" : "lax",
+};
+
 // ================= AUTH ROUTES =================
 
 // Register (auto-login)
@@ -144,17 +160,18 @@ app.post("/api/auth/register", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", refreshToken, cookieOpts);
 
         return res.status(201).json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
+            user: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+                phone: user.phone,
+                role: user.role || "user",
+                avatar: user.avatar || "",
+            },
             message: "Đăng ký thành công",
         });
     } catch (err) {
@@ -182,17 +199,18 @@ app.post("/api/auth/login", async (req, res) => {
         user.refreshTokens.push(refreshToken);
         await user.save();
 
-        res.cookie("refreshToken", refreshToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", refreshToken, cookieOpts);
 
         res.json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
+            user: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+                phone: user.phone,
+                role: user.role || "user",
+                avatar: user.avatar || "",
+            },
         });
     } catch (err) {
         console.error("Login error:", err);
@@ -230,17 +248,18 @@ app.post("/api/auth/refresh", async (req, res) => {
 
         const accessToken = generateAccessToken(user);
 
-        res.cookie("refreshToken", newRefresh, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            maxAge: 7 * 24 * 3600 * 1000,
-            path: "/",
-        });
+        res.cookie("refreshToken", newRefresh, cookieOpts);
 
         res.json({
             accessToken,
-            user: { id: user._id, email: user.email, name: user.name, phone: user.phone, role: user.role || "user", avatar: user.avatar || "" },
+            user: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+                phone: user.phone,
+                role: user.role || "user",
+                avatar: user.avatar || "",
+            },
         });
     } catch (err) {
         console.error("Refresh error:", err);
@@ -265,7 +284,7 @@ app.post("/api/auth/logout", async (req, res) => {
             }
         }
 
-        res.clearCookie("refreshToken", { path: "/" });
+        res.clearCookie("refreshToken", clearCookieOpts);
         res.json({ message: "Logged out" });
     } catch (err) {
         console.error("Logout error:", err);
@@ -378,7 +397,21 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
             pipeline = [
                 { $group: { _id: { y: { $year: "$date" }, m: { $month: "$date" } }, value: { $sum: "$count" } } },
                 { $project: { _id: 0, y: "$_id.y", m: "$_id.m", value: 1 } },
-                { $addFields: { label: { $concat: [{ $toString: "$y" }, "-", { $toString: { $cond: [{ $lt: ["$m", 10] }, { $concat: ["0", { $toString: "$m" }] }, { $toString: "$m" }] } }] } } },
+                {
+                    $addFields: {
+                        label: {
+                            $concat: [
+                                { $toString: "$y" },
+                                "-",
+                                {
+                                    $toString: {
+                                        $cond: [{ $lt: ["$m", 10] }, { $concat: ["0", { $toString: "$m" }] }, { $toString: "$m" }],
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                },
                 { $sort: { y: -1, m: -1 } },
                 { $limit: Math.min(limit, 60) },
                 { $sort: { y: 1, m: 1 } },
@@ -409,7 +442,7 @@ function logFav(msg, extra = {}) {
     } catch {}
 }
 
-// Preflight for the two favorite endpoints (+ alias)
+// Preflight riêng cho 2 endpoint (có path cụ thể — OK)
 app.options("/api/track/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
 app.options("/api/track/favorite/toggle", cors({ origin: corsOptionsDelegate, credentials: true }));
 app.options("/api/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
@@ -541,17 +574,13 @@ app.get("/api/admin/favorites", requireAuth, async (req, res) => {
 });
 
 // ================= USER PERSONAL FAVORITES (per-user) =================
-// GET /api/user/favorites  -> trả danh sách heritage user đã lưu
 app.get("/api/user/favorites", requireAuth, async (req, res) => {
     try {
         const userId = req.user.sub;
-        const rows = await UserFavorite
-            .find({ userId })
-            .sort({ createdAt: -1 })
-            .lean();
+        const rows = await UserFavorite.find({ userId }).sort({ createdAt: -1 }).lean();
 
         res.json({
-            items: rows.map(r => ({
+            items: rows.map((r) => ({
                 heritageId: r.heritageId,
                 name: r.name || "",
                 createdAt: r.createdAt,
@@ -563,9 +592,6 @@ app.get("/api/user/favorites", requireAuth, async (req, res) => {
     }
 });
 
-// POST /api/user/favorites/toggle { heritageId, name, vote: true|false }
-// - vote=true => lưu / upsert
-// - vote=false => xóa
 app.post("/api/user/favorites/toggle", requireAuth, async (req, res) => {
     try {
         const userId = req.user.sub;
@@ -589,7 +615,6 @@ app.post("/api/user/favorites/toggle", requireAuth, async (req, res) => {
         res.status(500).json({ ok: false, message: "Failed to toggle favorite" });
     }
 });
-
 
 // ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
