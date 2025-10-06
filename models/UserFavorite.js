@@ -4,12 +4,12 @@ const userFavoriteSchema = new mongoose.Schema(
     {
         userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
         heritageId: { type: String, required: true },
-        name: { type: String, default: "" }, // tên heritage để hiển thị nhanh
+        name: { type: String, default: "" },
     },
     { timestamps: true }
 );
 
-// Mỗi user chỉ lưu 1 lần / heritage
+// unique per userId + heritageId
 userFavoriteSchema.index({ userId: 1, heritageId: 1 }, { unique: true });
 
 export default mongoose.model("UserFavorite", userFavoriteSchema);
