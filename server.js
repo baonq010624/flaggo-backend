@@ -21,7 +21,7 @@ dotenv.config();
 // ============== Cloudinary config ==============
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key:    process.env.CLOUDINARY_API_KEY,
+    api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
@@ -99,7 +99,7 @@ function generateRefreshToken(user) {
 // ================= middleware =================
 function requireAuth(req, res, next) {
     const authHeader = req.headers["authorization"];
-    if (!authHeader) return res.status(401).json({ message: "Missing token" });
+    if (!authHeader) return res.status(401).json({ message: "Thiếu token truy cập." });
 
     const token = authHeader.split(" ")[1];
     try {
@@ -107,7 +107,7 @@ function requireAuth(req, res, next) {
         req.user = decoded;
         next();
     } catch (err) {
-        return res.status(403).json({ message: "Invalid token" });
+        return res.status(403).json({ message: "Token không hợp lệ hoặc đã hết hạn." });
     }
 }
 
@@ -116,7 +116,7 @@ const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
     fileFilter: (req, file, cb) => {
-        if (!file.mimetype.startsWith("image/")) return cb(new Error("Only images allowed"));
+        if (!file.mimetype.startsWith("image/")) return cb(new Error("Chỉ cho phép tải lên tệp ảnh."));
         cb(null, true);
     },
 });
@@ -125,8 +125,8 @@ const upload = multer({
 const isProd = process.env.NODE_ENV === "production";
 const cookieOpts = {
     httpOnly: true,
-    secure: isProd,                 // prod: true (HTTPS), dev: false
-    sameSite: isProd ? "none" : "lax", // prod cross-site cần None; dev để Lax
+    secure: isProd,                     // prod: true (HTTPS), dev: false
+    sameSite: isProd ? "none" : "lax",  // prod cross-site cần None; dev để Lax
     maxAge: 7 * 24 * 3600 * 1000,
     path: "/",
 };
@@ -142,16 +142,21 @@ const clearCookieOpts = {
 app.post("/api/auth/register", async (req, res) => {
     try {
         const { email, password, name = "", phone = "" } = req.body;
-        if (!email || !password) return res.status(400).json({ message: "Missing email or password" });
+        if (!email || !password) return res.status(400).json({ message: "Vui lòng nhập email và mật khẩu." });
 
         const emailTrim = String(email).trim().toLowerCase();
-        if (password.length < 6) return res.status(400).json({ message: "Password must be >= 6 chars" });
+        if (password.length < 6) return res.status(400).json({ message: "Mật khẩu phải có ít nhất 6 ký tự." });
 
         const existing = await User.findOne({ email: emailTrim });
-        if (existing) return res.status(409).json({ message: "Email already registered" });
+        if (existing) return res.status(409).json({ message: "Email đã được đăng ký." });
 
         const passwordHash = await bcrypt.hash(password, 12);
-        const user = new User({ email: emailTrim, passwordHash, name: String(name).trim(), phone: String(phone).trim() });
+        const user = new User({
+            email: emailTrim,
+            passwordHash,
+            name: String(name).trim(),
+            phone: String(phone).trim(),
+        });
         await user.save();
 
         const accessToken = generateAccessToken(user);
@@ -172,12 +177,12 @@ app.post("/api/auth/register", async (req, res) => {
                 role: user.role || "user",
                 avatar: user.avatar || "",
             },
-            message: "Đăng ký thành công",
+            message: "Đăng ký thành công.",
         });
     } catch (err) {
         console.error("Register error:", err);
-        if (err.code === 11000) return res.status(409).json({ message: "Email already in use" });
-        res.status(500).json({ message: "Failed to register" });
+        if (err.code === 11000) return res.status(409).json({ message: "Email đã được sử dụng." });
+        res.status(500).json({ message: "Lỗi máy chủ khi đăng ký." });
     }
 });
 
@@ -185,13 +190,13 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ message: "Missing credentials" });
+        if (!email || !password) return res.status(400).json({ message: "Vui lòng nhập đầy đủ email và mật khẩu." });
 
         const user = await User.findOne({ email: String(email).trim().toLowerCase() });
-        if (!user) return res.status(401).json({ message: "Invalid email or password" });
+        if (!user) return res.status(401).json({ message: "Email hoặc mật khẩu không đúng." });
 
         const valid = await bcrypt.compare(password, user.passwordHash);
-        if (!valid) return res.status(401).json({ message: "Invalid email or password" });
+        if (!valid) return res.status(401).json({ message: "Email hoặc mật khẩu không đúng." });
 
         const accessToken = generateAccessToken(user);
         const refreshToken = generateRefreshToken(user);
@@ -214,7 +219,7 @@ app.post("/api/auth/login", async (req, res) => {
         });
     } catch (err) {
         console.error("Login error:", err);
-        res.status(500).json({ message: "Failed to login" });
+        res.status(500).json({ message: "Lỗi máy chủ khi đăng nhập." });
     }
 });
 
@@ -222,22 +227,22 @@ app.post("/api/auth/login", async (req, res) => {
 app.post("/api/auth/refresh", async (req, res) => {
     try {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
-        if (!token) return res.status(401).json({ message: "Missing refresh token" });
+        if (!token) return res.status(401).json({ message: "Thiếu refresh token." });
 
         let payload;
         try {
             payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
         } catch (e) {
-            return res.status(401).json({ message: "Invalid refresh token" });
+            return res.status(401).json({ message: "Refresh token không hợp lệ." });
         }
 
         const user = await User.findById(payload.sub);
-        if (!user) return res.status(401).json({ message: "User not found" });
+        if (!user) return res.status(401).json({ message: "Không tìm thấy người dùng." });
 
         if (!user.refreshTokens.includes(token)) {
             user.refreshTokens = [];
             await user.save();
-            return res.status(401).json({ message: "Refresh token not recognized" });
+            return res.status(401).json({ message: "Refresh token không được hệ thống ghi nhận." });
         }
 
         // rotate refresh tokens
@@ -263,7 +268,7 @@ app.post("/api/auth/refresh", async (req, res) => {
         });
     } catch (err) {
         console.error("Refresh error:", err);
-        res.status(500).json({ message: "Failed to refresh token" });
+        res.status(500).json({ message: "Lỗi máy chủ khi làm mới phiên đăng nhập." });
     }
 });
 
@@ -273,7 +278,11 @@ app.post("/api/auth/logout", async (req, res) => {
         const token = req.cookies?.refreshToken || req.body?.refreshToken;
         if (token) {
             const payload = (() => {
-                try { return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET); } catch { return null; }
+                try {
+                    return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
+                } catch {
+                    return null;
+                }
             })();
             if (payload) {
                 const user = await User.findById(payload.sub);
@@ -285,10 +294,10 @@ app.post("/api/auth/logout", async (req, res) => {
         }
 
         res.clearCookie("refreshToken", clearCookieOpts);
-        res.json({ message: "Logged out" });
+        res.json({ message: "Đã đăng xuất." });
     } catch (err) {
         console.error("Logout error:", err);
-        res.status(500).json({ message: "Failed to logout" });
+        res.status(500).json({ message: "Lỗi máy chủ khi đăng xuất." });
     }
 });
 
@@ -298,7 +307,7 @@ app.post("/api/auth/logout", async (req, res) => {
 app.get("/api/me", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("-passwordHash -refreshTokens");
-        if (!user) return res.status(404).json({ message: "User not found" });
+        if (!user) return res.status(404).json({ message: "Không tìm thấy người dùng." });
 
         res.json({
             id: user._id,
@@ -310,8 +319,8 @@ app.get("/api/me", requireAuth, async (req, res) => {
             avatar: user.avatar || "",
         });
     } catch (err) {
-        console.error("Error fetching user:", err);
-        res.status(500).json({ message: "Failed to fetch user" });
+        console.error("Get /me error:", err);
+        res.status(500).json({ message: "Lỗi máy chủ khi lấy thông tin người dùng." });
     }
 });
 
@@ -319,11 +328,11 @@ app.get("/api/me", requireAuth, async (req, res) => {
 app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, res) => {
     try {
         if (!req.file || !req.file.buffer) {
-            return res.status(400).json({ message: "No file uploaded" });
+            return res.status(400).json({ message: "Không có tệp nào được tải lên." });
         }
 
         const user = await User.findById(req.user.sub);
-        if (!user) return res.status(404).json({ message: "User not found" });
+        if (!user) return res.status(404).json({ message: "Không tìm thấy người dùng." });
 
         const result = await uploadBufferToCloudinary(req.file.buffer, "flaggo/avatars");
         const secureUrl = result.secure_url;
@@ -331,10 +340,10 @@ app.post("/api/user/avatar", requireAuth, upload.single("avatar"), async (req, r
         user.avatar = secureUrl;
         await user.save();
 
-        res.json({ message: "Avatar updated", avatar: secureUrl });
+        res.json({ message: "Cập nhật ảnh đại diện thành công.", avatar: secureUrl });
     } catch (err) {
         console.error("Avatar upload error:", err);
-        res.status(500).json({ message: "Failed to update avatar" });
+        res.status(500).json({ message: "Lỗi máy chủ khi cập nhật ảnh đại diện." });
     }
 });
 
@@ -362,14 +371,14 @@ app.post("/api/track/visit", async (req, res) => {
 app.get("/api/admin/stats", requireAuth, async (req, res) => {
     try {
         const user = await User.findById(req.user.sub).select("role");
-        if (!user) return res.status(404).json({ message: "User not found" });
-        if (user.role !== "admin") return res.status(403).json({ message: "Access denied: insufficient role" });
+        if (!user) return res.status(404).json({ message: "Không tìm thấy người dùng." });
+        if (user.role !== "admin") return res.status(403).json({ message: "Truy cập bị từ chối: không đủ quyền." });
 
         const userCount = await User.countDocuments();
         res.json({ userCount });
     } catch (err) {
         console.error("Admin stats error:", err);
-        res.status(500).json({ message: "Failed to fetch stats" });
+        res.status(500).json({ message: "Lỗi máy chủ khi lấy thống kê." });
     }
 });
 
@@ -377,8 +386,8 @@ app.get("/api/admin/stats", requireAuth, async (req, res) => {
 app.get("/api/admin/visits", requireAuth, async (req, res) => {
     try {
         const me = await User.findById(req.user.sub).select("role");
-        if (!me) return res.status(404).json({ message: "User not found" });
-        if (me.role !== "admin") return res.status(403).json({ message: "Access denied" });
+        if (!me) return res.status(404).json({ message: "Không tìm thấy người dùng." });
+        if (me.role !== "admin") return res.status(403).json({ message: "Truy cập bị từ chối." });
 
         const mode = (req.query.mode || "day").toLowerCase(); // day | month | year
         const limit = Math.max(1, Math.min(parseInt(req.query.limit || "30", 10), 365));
@@ -430,7 +439,7 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
         return res.json({ mode, rows });
     } catch (err) {
         console.error("admin visits error:", err);
-        res.status(500).json({ message: "Failed to fetch visits" });
+        res.status(500).json({ message: "Lỗi máy chủ khi lấy thống kê lượt truy cập." });
     }
 });
 
@@ -454,7 +463,7 @@ app.post("/api/track/favorite", async (req, res) => {
         const { heritageId, name } = req.body || {};
         const id = String(heritageId || "").trim();
         const nm = String(name || "").trim();
-        if (!id || !nm) return res.status(400).json({ ok: false, message: "Missing heritageId or name" });
+        if (!id || !nm) return res.status(400).json({ ok: false, message: "Thiếu 'heritageId' hoặc 'name'." });
 
         await Favorite.updateOne(
             { heritageId: id },
@@ -465,7 +474,7 @@ app.post("/api/track/favorite", async (req, res) => {
         res.json({ ok: true });
     } catch (err) {
         console.error("track favorite error:", err);
-        res.status(500).json({ ok: false });
+        res.status(500).json({ ok: false, message: "Lỗi máy chủ khi ghi nhận yêu thích." });
     }
 });
 
@@ -509,7 +518,7 @@ async function handleFavoriteToggle(req, res) {
 
         if (!id || !nm || !cid) {
             logFav("toggle missing params", { id, nm, cid });
-            return res.status(400).json({ ok: false, message: "Missing params" });
+            return res.status(400).json({ ok: false, message: "Thiếu tham số bắt buộc." });
         }
 
         const existing = await FavoriteVote.findOne({ heritageId: id, clientId: cid });
@@ -546,7 +555,7 @@ async function handleFavoriteToggle(req, res) {
         return res.json({ ok: true, voted: want });
     } catch (err) {
         console.error("favorite toggle error:", err);
-        res.status(500).json({ ok: false });
+        res.status(500).json({ ok: false, message: "Lỗi máy chủ khi cập nhật yêu thích." });
     }
 }
 app.post("/api/track/favorite/toggle", handleFavoriteToggle);
@@ -559,8 +568,8 @@ app.post("/api/favorite/toggle", handleFavoriteToggle); // alias
 app.get("/api/admin/favorites", requireAuth, async (req, res) => {
     try {
         const me = await User.findById(req.user.sub).select("role");
-        if (!me) return res.status(404).json({ message: "User not found" });
-        if (me.role !== "admin") return res.status(403).json({ message: "Access denied" });
+        if (!me) return res.status(404).json({ message: "Không tìm thấy người dùng." });
+        if (me.role !== "admin") return res.status(403).json({ message: "Truy cập bị từ chối." });
 
         const limit = Math.max(1, Math.min(parseInt(req.query.limit || "20", 10), 100));
         const docs = await Favorite.find({}).sort({ count: -1, updatedAt: -1 }).limit(limit).lean();
@@ -569,7 +578,7 @@ app.get("/api/admin/favorites", requireAuth, async (req, res) => {
         res.json({ rows });
     } catch (err) {
         console.error("admin favorites error:", err);
-        res.status(500).json({ message: "Failed to fetch favorites" });
+        res.status(500).json({ message: "Lỗi máy chủ khi lấy thống kê yêu thích." });
     }
 });
 
@@ -588,7 +597,7 @@ app.get("/api/user/favorites", requireAuth, async (req, res) => {
         });
     } catch (err) {
         console.error("get /api/user/favorites error:", err);
-        res.status(500).json({ message: "Failed to fetch favorites" });
+        res.status(500).json({ message: "Lỗi máy chủ khi lấy danh sách đã lưu." });
     }
 });
 
@@ -597,7 +606,7 @@ app.post("/api/user/favorites/toggle", requireAuth, async (req, res) => {
         const userId = req.user.sub;
         const { heritageId, name, vote } = req.body || {};
         const id = String(heritageId || "").trim();
-        if (!id) return res.status(400).json({ ok: false, message: "Missing heritageId" });
+        if (!id) return res.status(400).json({ ok: false, message: "Thiếu 'heritageId'." });
 
         if (vote) {
             await UserFavorite.updateOne(
@@ -612,7 +621,7 @@ app.post("/api/user/favorites/toggle", requireAuth, async (req, res) => {
         }
     } catch (err) {
         console.error("post /api/user/favorites/toggle error:", err);
-        res.status(500).json({ ok: false, message: "Failed to toggle favorite" });
+        res.status(500).json({ ok: false, message: "Lỗi máy chủ khi lưu/bỏ lưu." });
     }
 });
 
