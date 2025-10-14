@@ -52,7 +52,7 @@ const allowedOrigins = (
     process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
     // mặc định đa môi trường (prod + preview + local)
-    "https://flaggo.online,https://flaggo-frontend.vercel.app, https://flaggoweb.netlify.app, http://localhost:3000"
+    "https://flaggo.online, https://www.flaggo.online, https://flaggo-frontend.vercel.app, https://flaggoweb.netlify.app, http://localhost:3000"
 )
     .split(",")
     .map((s) => s.trim())
