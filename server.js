@@ -48,25 +48,42 @@ app.use(express.json());
 app.use(cookieParser());
 
 // ================= CORS (multi-origin) =================
-const allowedOrigins = (
+const rawOrigins =
     process.env.ALLOWED_ORIGINS ||
     process.env.CLIENT_URL ||
-    // mặc định đa môi trường (prod + preview + local)
-    "https://flaggo.online, https://www.flaggo.online, https://flaggo-frontend.vercel.app, https://flaggoweb.netlify.app, http://localhost:3000"
-)
+    // Mặc định: prod + vercel preview + local (KHÔNG còn Netlify)
+    "https://flaggo.online, https://www.flaggo.online, https://flaggo-frontend.vercel.app, http://localhost:3000";
+
+const allowedOrigins = rawOrigins
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/\/+$/, "")) // bỏ dấu "/" cuối cho đồng nhất
     .filter(Boolean);
 
 console.log("[CORS] allowedOrigins:", allowedOrigins);
 
+function isAllowedOrigin(origin) {
+    try {
+        const norm = origin.replace(/\/+$/, "");
+        if (allowedOrigins.includes(norm)) return true;
+
+        const u = new URL(origin);
+        const host = u.host.toLowerCase();
+        // Cho phép toàn bộ subdomain của flaggo.online
+        if (host === "flaggo.online" || host.endsWith(".flaggo.online")) return true;
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
 const corsOptionsDelegate = function (origin, callback) {
     if (!origin) return callback(null, true); // Postman/SSR
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS"));
 };
 
-// cors toàn cục (bao gồm preflight)
+// cors toàn cục (tự xử lý cả preflight OPTIONS)
 app.use(
     cors({
         origin: corsOptionsDelegate,
@@ -125,8 +142,8 @@ const upload = multer({
 const isProd = process.env.NODE_ENV === "production";
 const cookieOpts = {
     httpOnly: true,
-    secure: isProd,                     // prod: true (HTTPS), dev: false
-    sameSite: isProd ? "none" : "lax",  // prod cross-site cần None; dev để Lax
+    secure: isProd,                    // prod: true (HTTPS), dev: false
+    sameSite: isProd ? "none" : "lax", // prod cross-site cần None; dev để Lax
     maxAge: 7 * 24 * 3600 * 1000,
     path: "/",
 };
@@ -451,13 +468,7 @@ function logFav(msg, extra = {}) {
     } catch {}
 }
 
-// Preflight riêng cho 2 endpoint (có path cụ thể — OK)
-app.options("/api/track/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
-app.options("/api/track/favorite/toggle", cors({ origin: corsOptionsDelegate, credentials: true }));
-app.options("/api/favorite/state", cors({ origin: corsOptionsDelegate, credentials: true }));
-app.options("/api/favorite/toggle", cors({ origin: corsOptionsDelegate, credentials: true }));
-
-// (legacy still available: /api/track/favorite — tăng đếm đơn thuần)
+// (Legacy) tăng đếm đơn thuần
 app.post("/api/track/favorite", async (req, res) => {
     try {
         const { heritageId, name } = req.body || {};
@@ -480,7 +491,7 @@ app.post("/api/track/favorite", async (req, res) => {
 
 /**
  * NEW: Kiểm tra trạng thái vote của 1 client với 1 heritage
- * GET  /api/track/favorite/state?heritageId=...&clientId=...
+ * GET /api/track/favorite/state?heritageId=...&clientId=...
  * ALIAS: /api/favorite/state
  */
 async function handleFavoriteState(req, res) {
