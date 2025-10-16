@@ -406,22 +406,72 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
         if (!me) return res.status(404).json({ message: "Không tìm thấy người dùng." });
         if (me.role !== "admin") return res.status(403).json({ message: "Truy cập bị từ chối." });
 
-        const mode = (req.query.mode || "day").toLowerCase(); // day | month | year
+        const mode = (req.query.mode || "day").toLowerCase(); // day | week | month | year
         const limit = Math.max(1, Math.min(parseInt(req.query.limit || "30", 10), 365));
 
         let pipeline = [];
+
         if (mode === "day") {
             pipeline = [
                 { $sort: { date: 1 } },
                 { $project: { date: 1, count: 1 } },
-                { $project: { label: { $dateToString: { date: "$date", format: "%Y-%m-%d" } }, value: "$count" } },
+                {
+                    $project: {
+                        label: { $dateToString: { date: "$date", format: "%Y-%m-%d" } },
+                        value: "$count",
+                    },
+                },
                 { $sort: { label: -1 } },
                 { $limit: limit },
                 { $sort: { label: 1 } },
             ];
+        } else if (mode === "week") {
+            // ===================== NEW weekly grouping with date range label =====================
+            pipeline = [
+                {
+                    $group: {
+                        _id: {
+                            y: { $isoWeekYear: "$date" },
+                            w: { $isoWeek: "$date" },
+                        },
+                        total: { $sum: "$count" },
+                        minDate: { $min: "$date" },
+                        maxDate: { $max: "$date" },
+                    },
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        y: "$_id.y",
+                        w: "$_id.w",
+                        value: "$total",
+                        startDate: "$minDate",
+                        endDate: "$maxDate",
+                    },
+                },
+                {
+                    $addFields: {
+                        label: {
+                            $concat: [
+                                { $dateToString: { format: "%d/%m", date: "$startDate" } },
+                                " – ",
+                                { $dateToString: { format: "%d/%m/%Y", date: "$endDate" } },
+                            ],
+                        },
+                    },
+                },
+                { $sort: { y: -1, w: -1 } },
+                { $limit: Math.min(limit, 52) },
+                { $sort: { y: 1, w: 1 } },
+            ];
         } else if (mode === "month") {
             pipeline = [
-                { $group: { _id: { y: { $year: "$date" }, m: { $month: "$date" } }, value: { $sum: "$count" } } },
+                {
+                    $group: {
+                        _id: { y: { $year: "$date" }, m: { $month: "$date" } },
+                        value: { $sum: "$count" },
+                    },
+                },
                 { $project: { _id: 0, y: "$_id.y", m: "$_id.m", value: 1 } },
                 {
                     $addFields: {
@@ -431,7 +481,11 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
                                 "-",
                                 {
                                     $toString: {
-                                        $cond: [{ $lt: ["$m", 10] }, { $concat: ["0", { $toString: "$m" }] }, { $toString: "$m" }],
+                                        $cond: [
+                                            { $lt: ["$m", 10] },
+                                            { $concat: ["0", { $toString: "$m" }] },
+                                            { $toString: "$m" },
+                                        ],
                                     },
                                 },
                             ],
@@ -459,6 +513,8 @@ app.get("/api/admin/visits", requireAuth, async (req, res) => {
         res.status(500).json({ message: "Lỗi máy chủ khi lấy thống kê lượt truy cập." });
     }
 });
+
+
 
 // ================= FAVORITES =================
 // Log helper
